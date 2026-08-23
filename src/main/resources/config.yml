@@ -1,0 +1,110 @@
+# GitHubMirrorPlugin 配置文件
+# 自动测速并选择最快的GitHub镜像站
+
+# 镜像站列表 - 按优先级排序，插件会自动测速选择最快的
+mirrors:
+  - name: "GitHub官方"
+    url: "https://github.com"
+    apiUrl: "https://api.github.com"
+    rawUrl: "https://raw.githubusercontent.com"
+    priority: 10
+    enabled: true
+
+  - name: "FastGit (推荐)"
+    url: "https://hub.fastgit.org"
+    apiUrl: "https://api.fastgit.org"
+    rawUrl: "https://raw.fastgit.org"
+    priority: 1
+    enabled: true
+
+  - name: "GitHub镜像 - gitee"
+    url: "https://gitee.com"
+    apiUrl: "https://gitee.com/api/v5"
+    rawUrl: "https://gitee.com"
+    priority: 2
+    enabled: true
+
+  - name: "GitHub镜像 - cnpmjs"
+    url: "https://github.com.cnpmjs.org"
+    apiUrl: "https://api.github.com.cnpmjs.org"
+    rawUrl: "https://raw.githubusercontent.com.cnpmjs.org"
+    priority: 3
+    enabled: true
+
+  - name: "GitHub镜像 - 镜像站"
+    url: "https://mirror.ghproxy.com"
+    apiUrl: "https://mirror.ghproxy.com"
+    rawUrl: "https://mirror.ghproxy.com"
+    priority: 4
+    enabled: true
+
+  - name: "GitHub镜像 - 云盘加速"
+    url: "https://gh.ddlc.top"
+    apiUrl: "https://gh.ddlc.top"
+    rawUrl: "https://gh.ddlc.top"
+    priority: 5
+    enabled: true
+
+  - name: "GitHub镜像 - 静态加速"
+    url: "https://gh.api.99988866.xyz"
+    apiUrl: "https://gh.api.99988866.xyz"
+    rawUrl: "https://gh.api.99988866.xyz"
+    priority: 6
+    enabled: true
+
+  - name: "GitHub镜像 - 备用1"
+    url: "https://gh-proxy.com"
+    apiUrl: "https://gh-proxy.com"
+    rawUrl: "https://gh-proxy.com"
+    priority: 7
+    enabled: true
+
+  - name: "GitHub镜像 - 备用2"
+    url: "https://gh.llkk.cc"
+    apiUrl: "https://gh.llkk.cc"
+    rawUrl: "https://gh.llkk.cc"
+    priority: 8
+    enabled: true
+
+# 测速配置
+speedtest:
+  # 测速超时时间(毫秒)
+  timeout: 5000
+  # 测速重试次数
+  retries: 2
+  # 并发测速数量
+  concurrent: 3
+  # 测速间隔(小时) - 0表示不自动测速
+  interval: 6
+  # 测速用的测试文件 (小文件，快速测速)
+  testFile: "https://raw.githubusercontent.com/github/gitignore/main/README.md"
+  # 备用测试文件
+  fallbackTestFiles:
+    - "https://raw.githubusercontent.com/golang/go/master/README.md"
+    - "https://raw.githubusercontent.com/python/cpython/main/README.rst"
+
+# 当前选中的镜像站 (自动更新，手动修改后重载生效)
+currentMirror: ""
+
+# 是否启用自动切换到最快镜像
+autoSwitch: true
+
+# 是否在控制台输出测速详情
+verbose: true
+
+# 代理设置 (如果服务器需要代理才能访问国外网站)
+proxy:
+  enabled: false
+  host: ""
+  port: 0
+  username: ""
+  password: ""
+
+# 事件监听配置
+events:
+  # 插件加载时自动测速
+  onEnable: true
+  # 定时任务触发测速
+  scheduled: true
+  # 测速完成后广播给OP
+  broadcastToOps: true
