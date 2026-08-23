@@ -29,55 +29,19 @@ public class HttpClientInterceptors {
     }
 
     /**
-     * 拦截并重定向 URL
+     * 拦截并重定向 URL (支持 prefix 前缀代理 与 replace 域名替换 两种镜像模式)
      */
     public static String intercept(String originalUrl) {
+        if (originalUrl == null) return null;
         if (mirrorManager == null) return originalUrl;
-        
-        MirrorSite currentMirror = mirrorManager.getCurrentMirror();
-        if (currentMirror == null || !currentMirror.isAvailable()) {
+
+        MirrorSite mirror = mirrorManager.getCurrentMirror();
+        if (mirror == null || !mirror.isAvailable()) {
             return originalUrl;
         }
 
-        if (originalUrl == null) return null;
-        
-        // GitHub 主站
-        if (originalUrl.startsWith("https://github.com/") || originalUrl.startsWith("http://github.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("github.com/") + "github.com/".length());
-            return currentMirror.getUrl() + "/" + path;
-        }
-        
-        // GitHub API
-        if (originalUrl.startsWith("https://api.github.com/") || originalUrl.startsWith("http://api.github.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("api.github.com/") + "api.github.com/".length());
-            return currentMirror.getApiUrl() + "/" + path;
-        }
-        
-        // Raw 文件
-        if (originalUrl.startsWith("https://raw.githubusercontent.com/") || originalUrl.startsWith("http://raw.githubusercontent.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("raw.githubusercontent.com/") + "raw.githubusercontent.com/".length());
-            return currentMirror.getRawUrl() + "/" + path;
-        }
-        
-        // Objects
-        if (originalUrl.startsWith("https://objects.githubusercontent.com/") || originalUrl.startsWith("http://objects.githubusercontent.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("objects.githubusercontent.com/") + "objects.githubusercontent.com/".length());
-            return currentMirror.getRawUrl() + "/" + path;
-        }
-        
-        // 其他 githubusercontent 子域名
-        if (originalUrl.contains("githubusercontent.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("githubusercontent.com/") + "githubusercontent.com/".length());
-            return currentMirror.getRawUrl() + "/" + path;
-        }
-
-        // 头像
-        if (originalUrl.contains("avatars.githubusercontent.com/")) {
-            String path = originalUrl.substring(originalUrl.indexOf("avatars.githubusercontent.com/") + "avatars.githubusercontent.com/".length());
-            return currentMirror.getRawUrl() + "/" + path;
-        }
-
-        return originalUrl;
+        String rewritten = mirror.rewrite(originalUrl);
+        return rewritten != null ? rewritten : originalUrl;
     }
 
     // ==================== Java 11+ HttpClient ====================

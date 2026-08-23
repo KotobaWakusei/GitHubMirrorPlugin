@@ -1,69 +1,63 @@
 # GitHubMirrorPlugin 配置文件
 # 自动测速并选择最快的GitHub镜像站
+#
+# ============================================================
+# 镜像站类型说明 (type 字段):
+#   prefix  - 前缀代理模式 (2026年主流):
+#             https://gh-proxy.com/https://github.com/user/repo/...
+#             只需配置 url 字段，支持 Releases/Raw/Archive/Gist/API/头像
+#
+#   replace - 域名替换模式:
+#             https://github.com/user/repo -> https://bgithub.xyz/user/repo
+#             可选配置 apiUrl / rawUrl 对应替换域名(留空=该类资源不加速)
+#
+# 提示: 若从旧版升级，建议删除本文件让插件重新生成默认配置。
+#       FastGit/cnpmjs/旧版ghproxy 等镜像已于 2024-2025 年间陆续失效。
+# ============================================================
 
-# 镜像站列表 - 按优先级排序，插件会自动测速选择最快的
 mirrors:
-  - name: "GitHub官方"
+  - name: "GitHub官方 (直连)"
+    type: replace
     url: "https://github.com"
     apiUrl: "https://api.github.com"
     rawUrl: "https://raw.githubusercontent.com"
-    priority: 10
+    priority: 100
     enabled: true
 
-  - name: "FastGit (推荐)"
-    url: "https://hub.fastgit.org"
-    apiUrl: "https://api.fastgit.org"
-    rawUrl: "https://raw.fastgit.org"
+  - name: "gh-proxy.com (Cloudflare全球, 推荐)"
+    type: prefix
+    url: "https://gh-proxy.com"
     priority: 1
     enabled: true
 
-  - name: "GitHub镜像 - gitee"
-    url: "https://gitee.com"
-    apiUrl: "https://gitee.com/api/v5"
-    rawUrl: "https://gitee.com"
+  - name: "ghproxy.net"
+    type: prefix
+    url: "https://ghproxy.net"
     priority: 2
     enabled: true
 
-  - name: "GitHub镜像 - cnpmjs"
-    url: "https://github.com.cnpmjs.org"
-    apiUrl: "https://api.github.com.cnpmjs.org"
-    rawUrl: "https://raw.githubusercontent.com.cnpmjs.org"
+  - name: "ghproxy.homeboyc.cn (大文件稳定)"
+    type: prefix
+    url: "https://ghproxy.homeboyc.cn"
     priority: 3
     enabled: true
 
-  - name: "GitHub镜像 - 镜像站"
-    url: "https://mirror.ghproxy.com"
-    apiUrl: "https://mirror.ghproxy.com"
-    rawUrl: "https://mirror.ghproxy.com"
+  - name: "github.akams.cn (支持API)"
+    type: prefix
+    url: "https://github.akams.cn"
     priority: 4
     enabled: true
 
-  - name: "GitHub镜像 - 云盘加速"
-    url: "https://gh.ddlc.top"
-    apiUrl: "https://gh.ddlc.top"
-    rawUrl: "https://gh.ddlc.top"
+  - name: "bgithub.xyz (全站浏览镜像)"
+    type: replace
+    url: "https://bgithub.xyz"
     priority: 5
     enabled: true
 
-  - name: "GitHub镜像 - 静态加速"
-    url: "https://gh.api.99988866.xyz"
-    apiUrl: "https://gh.api.99988866.xyz"
-    rawUrl: "https://gh.api.99988866.xyz"
+  - name: "kkgithub.com (全站浏览镜像)"
+    type: replace
+    url: "https://kkgithub.com"
     priority: 6
-    enabled: true
-
-  - name: "GitHub镜像 - 备用1"
-    url: "https://gh-proxy.com"
-    apiUrl: "https://gh-proxy.com"
-    rawUrl: "https://gh-proxy.com"
-    priority: 7
-    enabled: true
-
-  - name: "GitHub镜像 - 备用2"
-    url: "https://gh.llkk.cc"
-    apiUrl: "https://gh.llkk.cc"
-    rawUrl: "https://gh.llkk.cc"
-    priority: 8
     enabled: true
 
 # 测速配置
@@ -89,7 +83,7 @@ currentMirror: ""
 # 是否启用自动切换到最快镜像
 autoSwitch: true
 
-# 是否在控制台输出测速详情
+# 是否在控制台输出测速详情与重定向日志
 verbose: true
 
 # 代理设置 (如果服务器需要代理才能访问国外网站)

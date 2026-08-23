@@ -35,8 +35,7 @@ public class GitHubMirrorPlugin extends JavaPlugin {
         // 初始化镜像管理器
         mirrorManager = new MirrorManager(this, configManager);
 
-        // 将镜像管理器注册给拦截器
-        GitHubURLStreamHandlerFactory.setMirrorManager(mirrorManager);
+        // 将镜像管理器注册给拦截器 (重定向逻辑统一由 HttpClientInterceptors 提供)
         HttpClientInterceptors.init(this, mirrorManager);
 
         // 注册命令
@@ -103,30 +102,14 @@ public class GitHubMirrorPlugin extends JavaPlugin {
         reloadConfig();
         configManager.loadConfig();
         mirrorManager.reloadMirrors();
-        GitHubURLStreamHandlerFactory.setMirrorManager(mirrorManager);
         HttpClientInterceptors.init(this, mirrorManager);
     }
 
     private void registerURLStreamHandlerFactory() {
-        try {
-            // 检查是否已经设置过工厂
-            java.lang.reflect.Field factoryField = URL.class.getDeclaredField("factory");
-            factoryField.setAccessible(true);
-            Object existingFactory = factoryField.get(null);
-            
-            if (existingFactory != null && !(existingFactory instanceof GitHubURLStreamHandlerFactory)) {
-                getLogger().warning("§c[GitHubMirror] URLStreamHandlerFactory 已被其他代码设置，无法注册拦截器: " + existingFactory.getClass().getName());
-                return;
-            }
-
-            GitHubURLStreamHandlerFactory factory = new GitHubURLStreamHandlerFactory(this);
-            URL.setURLStreamHandlerFactory(factory);
+        // install() 内部会先捕获内置处理器再注册工厂，避免无限递归
+        boolean ok = GitHubURLStreamHandlerFactory.install(this);
+        if (ok) {
             getLogger().info("§a[GitHubMirror] URL 拦截器已注册，将自动重定向 GitHub 请求");
-        } catch (Error e) {
-            // Error 表示工厂已被设置，无法再次设置
-            getLogger().warning("§c[GitHubMirror] URLStreamHandlerFactory 已被设置，无法注册拦截器: " + e.getMessage());
-        } catch (Exception e) {
-            getLogger().warning("§c[GitHubMirror] 注册 URL 拦截器失败: " + e.getMessage());
         }
     }
 }

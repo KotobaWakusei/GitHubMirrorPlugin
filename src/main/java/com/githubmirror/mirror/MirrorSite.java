@@ -2,10 +2,16 @@ package com.githubmirror.mirror;
 
 public class MirrorSite {
 
+    /** 前缀代理模式: https://gh-proxy.com/https://github.com/... */
+    public static final String TYPE_PREFIX = "prefix";
+    /** 域名替换模式: https://github.com/user/repo -> https://bgithub.xyz/user/repo */
+    public static final String TYPE_REPLACE = "replace";
+
     private String name;
-    private String url;
-    private String apiUrl;
-    private String rawUrl;
+    private String type;   // "prefix"(默认) 或 "replace"
+    private String url;    // prefix: 代理基础地址; replace: github.com 的替换域名
+    private String apiUrl; // 仅 replace 模式: api.github.com 替换域名(空=不支持)
+    private String rawUrl; // 仅 replace 模式: *.githubusercontent.com 替换域名(空=不支持)
     private int priority;
     private boolean enabled;
 
@@ -23,93 +29,107 @@ public class MirrorSite {
         this.available = false;
     }
 
-    public String getName() {
-        return name;
+    public boolean isPrefix() {
+        return type == null || type.trim().isEmpty()
+                || TYPE_PREFIX.equalsIgnoreCase(type.trim());
     }
 
-    public void setName(String name) {
-        this.name = name;
+    public String getType() {
+        return isPrefix() ? TYPE_PREFIX : TYPE_REPLACE;
     }
 
-    public String getUrl() {
-        return url;
+    public void setType(String type) {
+        this.type = type;
     }
 
-    public void setUrl(String url) {
-        this.url = url;
+    private static String normalize(String base) {
+        if (base == null || base.trim().isEmpty()) return "";
+        String b = base.trim();
+        while (b.endsWith("/")) b = b.substring(0, b.length() - 1);
+        return b;
     }
 
-    public String getApiUrl() {
-        return apiUrl;
+    /**
+     * 将任意 GitHub URL 重写为该镜像的地址。
+     *
+     * @return 重写后的 URL；若该镜像不支持此资源类型则返回 null（调用方应回退原地址）
+     */
+    public String rewrite(String originalUrl) {
+        if (originalUrl == null || originalUrl.isEmpty()) return null;
+
+        if (isPrefix()) {
+            String base = normalize(url);
+            if (base.isEmpty()) return null;
+            // 前缀代理: base + "/" + 完整原始URL (gh-proxy 等标准用法)
+            return base + "/" + originalUrl;
+        }
+
+        // 域名替换模式
+        String u = normalize(url);
+        String api = normalize(apiUrl);
+        String raw = normalize(rawUrl);
+
+        for (String scheme : new String[]{"https://", "http://"}) {
+            if (originalUrl.regionMatches(true, 0, scheme + "api.github.com", 0,
+                    scheme.length() + "api.github.com".length())) {
+                if (api.isEmpty()) return null;
+                return api + originalUrl.substring(scheme.length() + "api.github.com".length());
+            }
+            if (originalUrl.regionMatches(true, 0, scheme + "raw.githubusercontent.com", 0,
+                    scheme.length() + "raw.githubusercontent.com".length())) {
+                if (raw.isEmpty()) return null;
+                return raw + originalUrl.substring(scheme.length() + "raw.githubusercontent.com".length());
+            }
+            if (originalUrl.contains(".githubusercontent.com/") && !raw.isEmpty()) {
+                int idx = originalUrl.indexOf(".githubusercontent.com/");
+                return raw + originalUrl.substring(idx + ".githubusercontent.com".length());
+            }
+            if (originalUrl.regionMatches(true, 0, scheme + "github.com", 0,
+                    scheme.length() + "github.com".length())
+                    && (originalUrl.length() == scheme.length() + "github.com".length()
+                        || originalUrl.charAt(scheme.length() + "github.com".length()) == '/')) {
+                if (u.isEmpty()) return null;
+                return u + originalUrl.substring(scheme.length() + "github.com".length());
+            }
+        }
+        return null; // 不匹配任何已知 GitHub 域名，不重写
     }
 
-    public void setApiUrl(String apiUrl) {
-        this.apiUrl = apiUrl;
+    /**
+     * 构造测速探测 URL。
+     *
+     * @return 探测地址；镜像不支持时返回 null
+     */
+    public String getTestUrl(String originalTestFile) {
+        if (isPrefix()) {
+            String base = normalize(url);
+            return base.isEmpty() ? null : base + "/" + originalTestFile;
+        }
+        return rewrite(originalTestFile);
     }
 
-    public String getRawUrl() {
-        return rawUrl;
-    }
-
-    public void setRawUrl(String rawUrl) {
-        this.rawUrl = rawUrl;
-    }
-
-    public int getPriority() {
-        return priority;
-    }
-
-    public void setPriority(int priority) {
-        this.priority = priority;
-    }
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
-
-    public long getLastTestTime() {
-        return lastTestTime;
-    }
-
-    public void setLastTestTime(long lastTestTime) {
-        this.lastTestTime = lastTestTime;
-    }
-
-    public long getAverageLatency() {
-        return averageLatency;
-    }
-
-    public void setAverageLatency(long averageLatency) {
-        this.averageLatency = averageLatency;
-    }
-
-    public int getSuccessCount() {
-        return successCount;
-    }
-
-    public void setSuccessCount(int successCount) {
-        this.successCount = successCount;
-    }
-
-    public int getFailureCount() {
-        return failureCount;
-    }
-
-    public void setFailureCount(int failureCount) {
-        this.failureCount = failureCount;
-    }
-
-    public boolean isAvailable() {
-        return available;
-    }
-
-    public void setAvailable(boolean available) {
-        this.available = available;
-    }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getUrl() { return url; }
+    public void setUrl(String url) { this.url = url; }
+    public String getApiUrl() { return apiUrl; }
+    public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
+    public String getRawUrl() { return rawUrl; }
+    public void setRawUrl(String rawUrl) { this.rawUrl = rawUrl; }
+    public int getPriority() { return priority; }
+    public void setPriority(int priority) { this.priority = priority; }
+    public boolean isEnabled() { return enabled; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public long getLastTestTime() { return lastTestTime; }
+    public void setLastTestTime(long lastTestTime) { this.lastTestTime = lastTestTime; }
+    public long getAverageLatency() { return averageLatency; }
+    public void setAverageLatency(long averageLatency) { this.averageLatency = averageLatency; }
+    public int getSuccessCount() { return successCount; }
+    public void setSuccessCount(int successCount) { this.successCount = successCount; }
+    public int getFailureCount() { return failureCount; }
+    public void setFailureCount(int failureCount) { this.failureCount = failureCount; }
+    public boolean isAvailable() { return available; }
+    public void setAvailable(boolean available) { this.available = available; }
 
     public void recordSuccess(long latency) {
         successCount++;
@@ -129,17 +149,10 @@ public class MirrorSite {
         }
     }
 
-    public String getTestUrl(String testFile) {
-        if (testFile.startsWith("https://raw.githubusercontent.com/")) {
-            String path = testFile.substring("https://raw.githubusercontent.com/".length());
-            return rawUrl + "/" + path;
-        }
-        return rawUrl + "/" + testFile;
-    }
-
     @Override
     public String toString() {
-        return String.format("MirrorSite{name='%s', url='%s', priority=%d, enabled=%s, latency=%dms, available=%s}",
-                name, url, priority, enabled, averageLatency == Long.MAX_VALUE ? -1 : averageLatency, available);
+        return String.format("MirrorSite{name='%s', type=%s, url='%s', priority=%d, latency=%dms, available=%s}",
+                name, getType(), url, priority,
+                averageLatency == Long.MAX_VALUE ? -1 : averageLatency, available);
     }
 }

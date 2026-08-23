@@ -1,244 +1,197 @@
 package com.githubmirror.interceptor;
 
 import com.githubmirror.GitHubMirrorPlugin;
-import com.githubmirror.mirror.MirrorManager;
-import com.githubmirror.mirror.MirrorSite;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.*;
-import java.security.Permission;
-import java.util.List;
-import java.util.Map;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.Proxy;
+import java.net.URL;
+import java.net.URLConnection;
+import java.net.URLStreamHandler;
+import java.net.URLStreamHandlerFactory;
 
+/**
+ * 全局 URL 拦截器。
+ *
+ * 关键设计：
+ * 1. 安装本工厂之前，必须先通过反射捕获 JVM 内置的 http/https 处理器，
+ *    之后所有连接一律委托给捕获的默认处理器。
+ * 2. 绝不在本类内调用 url.openConnection()——否则会再次进入自身导致无限递归
+ *    （StackOverflowError）。
+ *
+ * 需要 JVM 参数: --add-opens java.base/java.net=ALL-UNNAMED
+ */
 public class GitHubURLStreamHandlerFactory implements URLStreamHandlerFactory {
 
     private final GitHubMirrorPlugin plugin;
-    private static volatile MirrorManager mirrorManager;
+    private final URLStreamHandler httpDefault;
+    private final URLStreamHandler httpsDefault;
 
-    public GitHubURLStreamHandlerFactory(GitHubMirrorPlugin plugin) {
+    // 反射缓存的默认处理器方法（setAccessible 已在 install() 中完成）
+    private static Method openConnMethod;
+    private static Method openConnProxyMethod;
+
+    // 重入保护：防止任何未知路径导致的无限递归
+    private static final ThreadLocal<Integer> DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final int MAX_DEPTH = 8;
+
+    private GitHubURLStreamHandlerFactory(GitHubMirrorPlugin plugin,
+                                          URLStreamHandler httpDefault,
+                                          URLStreamHandler httpsDefault) {
         this.plugin = plugin;
+        this.httpDefault = httpDefault;
+        this.httpsDefault = httpsDefault;
     }
 
-    public static void setMirrorManager(MirrorManager manager) {
-        mirrorManager = manager;
+    /**
+     * 安装全局拦截器。
+     * 必须在任何网络请求发生之前调用；内部会先捕获内置处理器再注册工厂。
+     *
+     * @return 是否安装成功（失败通常因为缺少 --add-opens 参数）
+     */
+    public static boolean install(GitHubMirrorPlugin plugin) {
+        try {
+            // 第 1 步：在工厂注册前捕获内置的默认协议处理器
+            Method getHandler = URL.class.getDeclaredMethod("getURLStreamHandler", String.class);
+            getHandler.setAccessible(true);
+            URLStreamHandler httpDefault = (URLStreamHandler) getHandler.invoke(null, "http");
+            URLStreamHandler httpsDefault = (URLStreamHandler) getHandler.invoke(null, "https");
+
+            if (httpDefault == null || httpsDefault == null) {
+                plugin.getLogger().warning("§c[GitHubMirror] 无法捕获内置 HTTP/HTTPS 处理器");
+                return false;
+            }
+
+            // 第 2 步：准备委托用的反射方法
+            openConnMethod = URLStreamHandler.class.getDeclaredMethod("openConnection", URL.class);
+            openConnMethod.setAccessible(true);
+
+            openConnProxyMethod = URLStreamHandler.class.getDeclaredMethod("openConnection", URL.class, Proxy.class);
+            openConnProxyMethod.setAccessible(true);
+
+            // 第 3 步：注册全局工厂（每个 JVM 只能一次）
+            URL.setURLStreamHandlerFactory(
+                    new GitHubURLStreamHandlerFactory(plugin, httpDefault, httpsDefault));
+            return true;
+        } catch (LinkageError e) {
+            plugin.getLogger().warning("§c[GitHubMirror] URLStreamHandlerFactory 已被占用: " + e.getMessage());
+            return false;
+        } catch (Throwable t) {
+            plugin.getLogger().warning("§c[GitHubMirror] 安装 URL 拦截器失败(缺少 --add-opens java.base/java.net=ALL-UNNAMED ?): "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
+            return false;
+        }
     }
 
     @Override
     public URLStreamHandler createURLStreamHandler(String protocol) {
-        if (!("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))) {
-            return null;
+        if ("http".equalsIgnoreCase(protocol)) {
+            return new RedirectingHandler(httpDefault, false);
         }
-        return new GitHubRedirectingStreamHandler(plugin);
+        if ("https".equalsIgnoreCase(protocol)) {
+            return new RedirectingHandler(httpsDefault, true);
+        }
+        return null; // 其他协议交给 JVM 默认查找
     }
 
-    public static class GitHubRedirectingStreamHandler extends URLStreamHandler {
+    public class RedirectingHandler extends URLStreamHandler {
 
-        private final GitHubMirrorPlugin plugin;
+        private final URLStreamHandler delegate;
+        private final boolean isHttps;
 
-        public GitHubRedirectingStreamHandler(GitHubMirrorPlugin plugin) {
-            this.plugin = plugin;
+        RedirectingHandler(URLStreamHandler delegate, boolean isHttps) {
+            this.delegate = delegate;
+            this.isHttps = isHttps;
         }
 
         @Override
         protected URLConnection openConnection(URL url) throws IOException {
-            return openConnection(url, null);
+            return handle(url, null);
         }
 
         @Override
         protected URLConnection openConnection(URL url, Proxy proxy) throws IOException {
-            String host = url.getHost();
-            if (shouldRedirect(host)) {
-                String mirroredUrl = getMirroredUrl(url);
-                if (mirroredUrl != null && !mirroredUrl.equals(url.toString())) {
-                    if (plugin.getConfigManager().isVerbose()) {
-                        plugin.getLogger().info("§b[GitHubMirror] 重定向: " + url + " -> " + mirroredUrl);
+            return handle(url, proxy);
+        }
+
+        private URLConnection handle(URL url, Proxy proxy) throws IOException {
+            int depth = DEPTH.get();
+            if (depth >= MAX_DEPTH) {
+                DEPTH.remove();
+                throw new IOException("[GitHubMirror] 重定向深度超限，中止请求: " + url);
+            }
+
+            URL target = url;
+            try {
+                // 仅在第一层做重定向决策，避免链式重定向/递归
+                if (depth == 0 && shouldRedirect(url.getHost())) {
+                    String mirrored = HttpClientInterceptors.intercept(url.toString());
+                    if (mirrored != null && !mirrored.equals(url.toString())) {
+                        if (plugin.getConfigManager().isVerbose()) {
+                            plugin.getLogger().info("§b[GitHubMirror] 重定向: " + url + " -> " + mirrored);
+                        }
+                        target = new URL(mirrored);
                     }
-                    URL newUrl = new URL(mirroredUrl);
-                    return createConnection(newUrl, proxy);
                 }
-            }
-            return createConnection(url, proxy);
-        }
 
-        private URLConnection createConnection(URL url, Proxy proxy) throws IOException {
-            if (proxy != null) {
-                return url.openConnection(proxy);
+                DEPTH.set(depth + 1);
+                try {
+                    if (proxy != null && openConnProxyMethod != null) {
+                        return (URLConnection) openConnProxyMethod.invoke(delegate, target, proxy);
+                    }
+                    return (URLConnection) openConnMethod.invoke(delegate, target);
+                } finally {
+                    DEPTH.set(depth);
+                }
+            } catch (InvocationTargetException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof IOException) {
+                    throw (IOException) cause;
+                }
+                throw new IOException("[GitHubMirror] 委托默认处理器失败", cause);
+            } catch (IllegalAccessException e) {
+                throw new IOException("[GitHubMirror] 反射访问被拒绝(检查 --add-opens java.base/java.net=ALL-UNNAMED)", e);
+            } catch (java.net.MalformedURLException e) {
+                throw new IOException("[GitHubMirror] 重定向目标非法: " + target, e);
             }
-            return url.openConnection();
-        }
-
-        private boolean shouldRedirect(String host) {
-            if (host == null) return false;
-            String lowerHost = host.toLowerCase();
-            return lowerHost.equals("github.com") ||
-                   lowerHost.equals("api.github.com") ||
-                   lowerHost.equals("raw.githubusercontent.com") ||
-                   lowerHost.equals("objects.githubusercontent.com") ||
-                   lowerHost.equals("avatars.githubusercontent.com") ||
-                   lowerHost.equals("camo.githubusercontent.com") ||
-                   lowerHost.equals("user-images.githubusercontent.com") ||
-                   lowerHost.equals("opengraph.githubassets.com") ||
-                   lowerHost.endsWith(".github.com") ||
-                   lowerHost.endsWith(".githubusercontent.com");
-        }
-
-        private String getMirroredUrl(URL originalUrl) {
-            if (mirrorManager == null) return null;
-            
-            MirrorSite currentMirror = mirrorManager.getCurrentMirror();
-            if (currentMirror == null || !currentMirror.isAvailable()) {
-                return null;
-            }
-
-            String original = originalUrl.toString();
-            
-            // GitHub 主站
-            if (original.startsWith("https://github.com/") || original.startsWith("http://github.com/")) {
-                String path = original.substring(original.indexOf("github.com/") + "github.com/".length());
-                return currentMirror.getUrl() + "/" + path;
-            }
-            
-            // GitHub API
-            if (original.startsWith("https://api.github.com/") || original.startsWith("http://api.github.com/")) {
-                String path = original.substring(original.indexOf("api.github.com/") + "api.github.com/".length());
-                return currentMirror.getApiUrl() + "/" + path;
-            }
-            
-            // Raw 文件
-            if (original.startsWith("https://raw.githubusercontent.com/") || original.startsWith("http://raw.githubusercontent.com/")) {
-                String path = original.substring(original.indexOf("raw.githubusercontent.com/") + "raw.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-            
-            // Objects (Releases 附件等)
-            if (original.startsWith("https://objects.githubusercontent.com/") || original.startsWith("http://objects.githubusercontent.com/")) {
-                String path = original.substring(original.indexOf("objects.githubusercontent.com/") + "objects.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-            
-            // 其他 githubusercontent 子域名
-            if (original.contains("githubusercontent.com/")) {
-                String path = original.substring(original.indexOf("githubusercontent.com/") + "githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-
-            // 头像等
-            if (original.contains("avatars.githubusercontent.com/")) {
-                String path = original.substring(original.indexOf("avatars.githubusercontent.com/") + "avatars.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-
-            return null;
         }
 
         @Override
         protected int getDefaultPort() {
-            return -1;
+            return isHttps ? 443 : 80;
         }
 
         @Override
-        protected String toExternalForm(URL url) {
-            return url.toString();
+        protected boolean equals(URL u1, URL u2) {
+            return u1.equals(u2);
         }
 
         @Override
-        protected boolean equals(URL url1, URL url2) {
-            return url1.equals(url2);
+        protected int hashCode(URL u) {
+            return u.hashCode();
         }
 
         @Override
-        protected int hashCode(URL url) {
-            return url.hashCode();
-        }
-
-        @Override
-        protected boolean sameFile(URL url1, URL url2) {
-            return url1.sameFile(url2);
-        }
-
-        @Override
-        protected InetAddress getHostAddress(URL url) {
-            try {
-                return InetAddress.getByName(url.getHost());
-            } catch (Exception e) {
-                return null;
-            }
+        protected boolean sameFile(URL u1, URL u2) {
+            return u1.sameFile(u2);
         }
     }
 
-    /**
-     * 为 OkHttp、HttpClient 等库提供的拦截器工具类
-     * 其他插件可以调用这些方法来获取重定向后的 URL
-     */
-    public static class HttpInterceptor {
-        
-        public static String intercept(String originalUrl) {
-            if (mirrorManager == null) return originalUrl;
-            
-            MirrorSite currentMirror = mirrorManager.getCurrentMirror();
-            if (currentMirror == null || !currentMirror.isAvailable()) {
-                return originalUrl;
-            }
-
-            if (originalUrl == null) return null;
-            
-            // GitHub 主站
-            if (originalUrl.startsWith("https://github.com/") || originalUrl.startsWith("http://github.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("github.com/") + "github.com/".length());
-                return currentMirror.getUrl() + "/" + path;
-            }
-            
-            // GitHub API
-            if (originalUrl.startsWith("https://api.github.com/") || originalUrl.startsWith("http://api.github.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("api.github.com/") + "api.github.com/".length());
-                return currentMirror.getApiUrl() + "/" + path;
-            }
-            
-            // Raw 文件
-            if (originalUrl.startsWith("https://raw.githubusercontent.com/") || originalUrl.startsWith("http://raw.githubusercontent.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("raw.githubusercontent.com/") + "raw.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-            
-            // Objects
-            if (originalUrl.startsWith("https://objects.githubusercontent.com/") || originalUrl.startsWith("http://objects.githubusercontent.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("objects.githubusercontent.com/") + "objects.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-            
-            // 其他 githubusercontent 子域名
-            if (originalUrl.contains("githubusercontent.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("githubusercontent.com/") + "githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-
-            // 头像
-            if (originalUrl.contains("avatars.githubusercontent.com/")) {
-                String path = originalUrl.substring(originalUrl.indexOf("avatars.githubusercontent.com/") + "avatars.githubusercontent.com/".length());
-                return currentMirror.getRawUrl() + "/" + path;
-            }
-
-            return originalUrl;
-        }
-
-        /**
-         * 创建一个自动重定向的 HttpURLConnection
-         */
-        public static HttpURLConnection openConnection(String urlString) throws IOException {
-            String intercepted = intercept(urlString);
-            URL url = new URL(intercepted);
-            return (HttpURLConnection) url.openConnection();
-        }
-
-        /**
-         * 创建一个自动重定向的 HttpURLConnection (带代理)
-         */
-        public static HttpURLConnection openConnection(String urlString, Proxy proxy) throws IOException {
-            String intercepted = intercept(urlString);
-            URL url = new URL(intercepted);
-            return (HttpURLConnection) url.openConnection(proxy);
-        }
+    private static boolean shouldRedirect(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase();
+        return h.equals("github.com")
+                || h.equals("api.github.com")
+                || h.equals("raw.githubusercontent.com")
+                || h.equals("objects.githubusercontent.com")
+                || h.equals("avatars.githubusercontent.com")
+                || h.equals("camo.githubusercontent.com")
+                || h.equals("user-images.githubusercontent.com")
+                || h.equals("opengraph.githubassets.com")
+                || h.equals("codeload.github.com")
+                || h.equals("gist.github.com")
+                || h.endsWith(".github.com")
+                || h.endsWith(".githubusercontent.com");
     }
 }

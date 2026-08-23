@@ -90,25 +90,32 @@ public class MirrorManager {
         boolean success = false;
         long latency = -1;
         String error = null;
-        
+
         String testUrl = mirror.getTestUrl(testConfig.getTestFile());
-        
+        if (testUrl == null) {
+            return new MirrorTestResult(mirror, false, -1,
+                    "镜像类型不支持测试文件(" + mirror.getType() + "模式缺少对应域名映射)");
+        }
+
         for (int attempt = 0; attempt <= testConfig.getRetries(); attempt++) {
             try {
                 URL url = new URL(testUrl);
                 HttpURLConnection connection = createConnection(url);
-                connection.setRequestMethod("HEAD");
+                // 使用 GET: 部分前缀代理对 HEAD 支持不佳
+                connection.setRequestMethod("GET");
                 connection.setConnectTimeout(testConfig.getTimeout());
                 connection.setReadTimeout(testConfig.getTimeout());
                 connection.setInstanceFollowRedirects(true);
-                
+
                 int responseCode = connection.getResponseCode();
                 if (responseCode >= 200 && responseCode < 400) {
                     success = true;
                     latency = System.currentTimeMillis() - startTime;
+                    closeQuietly(connection);
                     break;
                 } else {
                     error = "HTTP " + responseCode;
+                    closeQuietly(connection);
                 }
             } catch (Exception e) {
                 error = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -117,28 +124,42 @@ public class MirrorManager {
                 }
             }
         }
-        
+
         if (!success && !testConfig.getFallbackTestFiles().isEmpty()) {
             for (String fallbackFile : testConfig.getFallbackTestFiles()) {
                 String fallbackUrl = mirror.getTestUrl(fallbackFile);
+                if (fallbackUrl == null) continue;
                 try {
                     URL url = new URL(fallbackUrl);
                     HttpURLConnection connection = createConnection(url);
-                    connection.setRequestMethod("HEAD");
+                    connection.setRequestMethod("GET");
                     connection.setConnectTimeout(testConfig.getTimeout());
                     connection.setReadTimeout(testConfig.getTimeout());
-                    
+
                     int responseCode = connection.getResponseCode();
                     if (responseCode >= 200 && responseCode < 400) {
                         success = true;
                         latency = System.currentTimeMillis() - startTime;
+                        closeQuietly(connection);
                         break;
                     }
+                    closeQuietly(connection);
                 } catch (Exception ignored) {}
             }
         }
-        
+
         return new MirrorTestResult(mirror, success, latency, error);
+    }
+
+    private void closeQuietly(HttpURLConnection connection) {
+        try {
+            java.io.InputStream in = connection.getErrorStream() != null
+                    ? connection.getErrorStream() : connection.getInputStream();
+            if (in != null) in.close();
+        } catch (Exception ignored) {
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private HttpURLConnection createConnection(URL url) throws IOException {
