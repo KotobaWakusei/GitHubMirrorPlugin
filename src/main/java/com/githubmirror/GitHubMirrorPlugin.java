@@ -38,9 +38,10 @@ public class GitHubMirrorPlugin extends JavaPlugin {
         // 将镜像管理器注册给拦截器 (重定向逻辑统一由 HttpClientInterceptors 提供)
         HttpClientInterceptors.init(this, mirrorManager);
 
-        // 注册命令
-        getCommand("githubmirror").setExecutor(new MirrorCommand(this, mirrorManager, configManager));
-        getCommand("githubmirror").setTabCompleter(new MirrorCommand(this, mirrorManager, configManager));
+        // 注册命令 (executor 与 tabCompleter 使用同一实例)
+        MirrorCommand mirrorCommand = new MirrorCommand(this, mirrorManager, configManager);
+        getCommand("githubmirror").setExecutor(mirrorCommand);
+        getCommand("githubmirror").setTabCompleter(mirrorCommand);
 
         // 注册监听器
         getServer().getPluginManager().registerEvents(new PluginListener(this, mirrorManager), this);
@@ -67,6 +68,10 @@ public class GitHubMirrorPlugin extends JavaPlugin {
         if (mirrorManager != null) {
             mirrorManager.shutdown();
         }
+        // 清理静态引用，避免其他插件在卸载后继续使用失效的管理器
+        GitHubMirrorAPI.shutdown();
+        HttpClientInterceptors.shutdown();
+        instance = null;
         getLogger().info("§c[GitHubMirror] 插件已卸载!");
     }
 
@@ -102,7 +107,6 @@ public class GitHubMirrorPlugin extends JavaPlugin {
         reloadConfig();
         configManager.loadConfig();
         mirrorManager.reloadMirrors();
-        HttpClientInterceptors.init(this, mirrorManager);
     }
 
     private void registerURLStreamHandlerFactory() {

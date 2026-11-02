@@ -19,6 +19,10 @@ import java.net.URLStreamHandlerFactory;
  *    之后所有连接一律委托给捕获的默认处理器。
  * 2. 绝不在本类内调用 url.openConnection()——否则会再次进入自身导致无限递归
  *    （StackOverflowError）。
+ * 3. 绝不覆写 equals/hashCode/sameFile：URL.equals()/URL.hashCode() 内部会回调
+ *    handler 的对应方法，若覆写成 "委托回 URL 自身" 会形成无限递归（爆栈）。
+ * 4. 测速等内部流量可通过 {@link #setBypassed(boolean)} 临时绕过全局重定向，
+ *    避免用当前镜像去测当前镜像。
  *
  * 需要 JVM 参数: --add-opens java.base/java.net=ALL-UNNAMED
  */
@@ -31,6 +35,9 @@ public class GitHubURLStreamHandlerFactory implements URLStreamHandlerFactory {
     // 反射缓存的默认处理器方法（setAccessible 已在 install() 中完成）
     private static Method openConnMethod;
     private static Method openConnProxyMethod;
+
+    /** 当前线程是否绕过全局重定向（供插件自身测速使用） */
+    private static final ThreadLocal<Boolean> BYPASS = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     // 重入保护：防止任何未知路径导致的无限递归
     private static final ThreadLocal<Integer> DEPTH = ThreadLocal.withInitial(() -> 0);
@@ -84,6 +91,23 @@ public class GitHubURLStreamHandlerFactory implements URLStreamHandlerFactory {
         }
     }
 
+    /** 当前线程是否绕过全局重定向 */
+    public static boolean isBypassed() {
+        return BYPASS.get();
+    }
+
+    /**
+     * 设置当前线程是否绕过全局重定向。
+     * 传 false 时清除标记（而非写入 false），避免线程池线程的 ThreadLocal 残留。
+     */
+    public static void setBypassed(boolean bypassed) {
+        if (bypassed) {
+            BYPASS.set(true);
+        } else {
+            BYPASS.remove();
+        }
+    }
+
     @Override
     public URLStreamHandler createURLStreamHandler(String protocol) {
         if ("http".equalsIgnoreCase(protocol)) {
@@ -124,8 +148,8 @@ public class GitHubURLStreamHandlerFactory implements URLStreamHandlerFactory {
 
             URL target = url;
             try {
-                // 仅在第一层做重定向决策，避免链式重定向/递归
-                if (depth == 0 && shouldRedirect(url.getHost())) {
+                // 仅在第一层做重定向决策，避免链式重定向/递归；测速线程直接绕过
+                if (depth == 0 && !BYPASS.get() && shouldRedirect(url.getHost())) {
                     String mirrored = HttpClientInterceptors.intercept(url.toString());
                     if (mirrored != null && !mirrored.equals(url.toString())) {
                         if (plugin.getConfigManager().isVerbose()) {
@@ -162,20 +186,9 @@ public class GitHubURLStreamHandlerFactory implements URLStreamHandlerFactory {
             return isHttps ? 443 : 80;
         }
 
-        @Override
-        protected boolean equals(URL u1, URL u2) {
-            return u1.equals(u2);
-        }
-
-        @Override
-        protected int hashCode(URL u) {
-            return u.hashCode();
-        }
-
-        @Override
-        protected boolean sameFile(URL u1, URL u2) {
-            return u1.sameFile(u2);
-        }
+        // 注意：不要覆写 equals/hashCode/sameFile。
+        // URL.equals()/hashCode() 会回调 handler 的这些方法，覆写成 "委托回 URL" 会无限递归。
+        // 使用 URLStreamHandler 的默认实现即可。
     }
 
     private static boolean shouldRedirect(String host) {

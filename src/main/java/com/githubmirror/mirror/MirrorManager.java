@@ -2,7 +2,9 @@ package com.githubmirror.mirror;
 
 import com.githubmirror.GitHubMirrorPlugin;
 import com.githubmirror.config.ConfigManager;
-import com.google.gson.Gson;
+import com.githubmirror.interceptor.GitHubURLStreamHandlerFactory;
+
+import org.bukkit.entity.Player;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -10,49 +12,51 @@ import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class MirrorManager {
 
     private final GitHubMirrorPlugin plugin;
     private final ConfigManager configManager;
-    private final List<MirrorSite> mirrors;
-    private MirrorSite currentMirror;
+    /** 只读快照：reload 时整体替换引用，避免与异步测速并发修改 */
+    private volatile List<MirrorSite> mirrors = List.of();
+    private volatile MirrorSite currentMirror;
     private final ExecutorService executorService;
-    private final Gson gson;
 
     public MirrorManager(GitHubMirrorPlugin plugin, ConfigManager configManager) {
         this.plugin = plugin;
         this.configManager = configManager;
-        this.mirrors = new ArrayList<>();
-        this.gson = new Gson();
         this.executorService = Executors.newFixedThreadPool(configManager.getSpeedTestConfig().getConcurrent());
         reloadMirrors();
     }
 
+    /**
+     * 重载镜像列表。
+     * 配置中保存的镜像名在新列表中无效时，回退到最高优先级的启用镜像，
+     * 避免 currentMirror 残留已被删除/禁用的旧镜像对象。
+     */
     public void reloadMirrors() {
-        mirrors.clear();
-        mirrors.addAll(configManager.getEnabledMirrors());
-        
+        List<MirrorSite> enabled = configManager.getEnabledMirrors();
+        this.mirrors = enabled;
+
+        MirrorSite found = null;
         String savedMirrorName = configManager.getCurrentMirror();
         if (!savedMirrorName.isEmpty()) {
-            for (MirrorSite mirror : mirrors) {
-                if (mirror.getName().equals(savedMirrorName)) {
-                    currentMirror = mirror;
+            for (MirrorSite mirror : enabled) {
+                if (savedMirrorName.equals(mirror.getName())) {
+                    found = mirror;
                     break;
                 }
             }
         }
-        
-        if (currentMirror == null && !mirrors.isEmpty()) {
-            currentMirror = mirrors.get(0);
+        if (found == null && !enabled.isEmpty()) {
+            found = enabled.get(0);
         }
+        this.currentMirror = found;
     }
 
     public void runSpeedTest(boolean broadcast) {
@@ -60,15 +64,15 @@ public class MirrorManager {
     }
 
     private void performSpeedTest(boolean broadcast) {
-        plugin.getLogger().info("§a[GitHubMirror] 开始测速 " + mirrors.size() + " 个镜像站...");
-        
+        List<MirrorSite> snapshot = mirrors;
+        plugin.getLogger().info("§a[GitHubMirror] 开始测速 " + snapshot.size() + " 个镜像站...");
+
         List<CompletableFuture<MirrorTestResult>> futures = new ArrayList<>();
         ConfigManager.SpeedTestConfig testConfig = configManager.getSpeedTestConfig();
-        
-        for (MirrorSite mirror : mirrors) {
-            CompletableFuture<MirrorTestResult> future = CompletableFuture.supplyAsync(() -> 
-                testMirror(mirror, testConfig), executorService);
-            futures.add(future);
+
+        for (MirrorSite mirror : snapshot) {
+            futures.add(CompletableFuture.supplyAsync(() ->
+                testMirror(mirror, testConfig), executorService));
         }
 
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenRun(() -> {
@@ -80,16 +84,24 @@ public class MirrorManager {
                     plugin.getLogger().warning("§c[GitHubMirror] 测速任务异常: " + e.getMessage());
                 }
             }
-            
+
             processResults(results, broadcast);
         });
     }
 
     private MirrorTestResult testMirror(MirrorSite mirror, ConfigManager.SpeedTestConfig testConfig) {
-        long startTime = System.currentTimeMillis();
-        boolean success = false;
-        long latency = -1;
-        String error = null;
+        // 测速期间本线程绕过全局 URL 拦截器，
+        // 避免探测请求被重定向到当前镜像，导致"用当前镜像测当前镜像"的污染结果
+        GitHubURLStreamHandlerFactory.setBypassed(true);
+        try {
+            return doTestMirror(mirror, testConfig);
+        } finally {
+            GitHubURLStreamHandlerFactory.setBypassed(false);
+        }
+    }
+
+    private MirrorTestResult doTestMirror(MirrorSite mirror, ConfigManager.SpeedTestConfig testConfig) {
+        mirror.setLastTestTime(System.currentTimeMillis());
 
         String testUrl = mirror.getTestUrl(testConfig.getTestFile());
         if (testUrl == null) {
@@ -97,7 +109,11 @@ public class MirrorManager {
                     "镜像类型不支持测试文件(" + mirror.getType() + "模式缺少对应域名映射)");
         }
 
+        String error = null;
+
+        // 主测试文件（延迟在每次尝试开始时计时，重试与等待不计入成功样本）
         for (int attempt = 0; attempt <= testConfig.getRetries(); attempt++) {
+            long startTime = System.currentTimeMillis();
             try {
                 URL url = new URL(testUrl);
                 HttpURLConnection connection = createConnection(url);
@@ -108,27 +124,31 @@ public class MirrorManager {
                 connection.setInstanceFollowRedirects(true);
 
                 int responseCode = connection.getResponseCode();
+                closeQuietly(connection);
                 if (responseCode >= 200 && responseCode < 400) {
-                    success = true;
-                    latency = System.currentTimeMillis() - startTime;
-                    closeQuietly(connection);
-                    break;
-                } else {
-                    error = "HTTP " + responseCode;
-                    closeQuietly(connection);
+                    return new MirrorTestResult(mirror, true,
+                            System.currentTimeMillis() - startTime, null);
                 }
+                error = "HTTP " + responseCode;
             } catch (Exception e) {
                 error = e.getClass().getSimpleName() + ": " + e.getMessage();
                 if (attempt < testConfig.getRetries()) {
-                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             }
         }
 
-        if (!success && !testConfig.getFallbackTestFiles().isEmpty()) {
+        // 备用测试文件
+        if (!testConfig.getFallbackTestFiles().isEmpty()) {
             for (String fallbackFile : testConfig.getFallbackTestFiles()) {
                 String fallbackUrl = mirror.getTestUrl(fallbackFile);
                 if (fallbackUrl == null) continue;
+                long startTime = System.currentTimeMillis();
                 try {
                     URL url = new URL(fallbackUrl);
                     HttpURLConnection connection = createConnection(url);
@@ -137,18 +157,17 @@ public class MirrorManager {
                     connection.setReadTimeout(testConfig.getTimeout());
 
                     int responseCode = connection.getResponseCode();
-                    if (responseCode >= 200 && responseCode < 400) {
-                        success = true;
-                        latency = System.currentTimeMillis() - startTime;
-                        closeQuietly(connection);
-                        break;
-                    }
                     closeQuietly(connection);
-                } catch (Exception ignored) {}
+                    if (responseCode >= 200 && responseCode < 400) {
+                        return new MirrorTestResult(mirror, true,
+                                System.currentTimeMillis() - startTime, null);
+                    }
+                } catch (Exception ignored) {
+                }
             }
         }
 
-        return new MirrorTestResult(mirror, success, latency, error);
+        return new MirrorTestResult(mirror, false, -1, error);
     }
 
     private void closeQuietly(HttpURLConnection connection) {
@@ -165,7 +184,7 @@ public class MirrorManager {
     private HttpURLConnection createConnection(URL url) throws IOException {
         ConfigManager.ProxyConfig proxyConfig = configManager.getProxyConfig();
         if (proxyConfig.isEnabled() && !proxyConfig.getHost().isEmpty()) {
-            Proxy proxy = new Proxy(Proxy.Type.HTTP, 
+            Proxy proxy = new Proxy(Proxy.Type.HTTP,
                 new InetSocketAddress(proxyConfig.getHost(), proxyConfig.getPort()));
             return (HttpURLConnection) url.openConnection(proxy);
         }
@@ -180,13 +199,13 @@ public class MirrorManager {
                 mirror.recordSuccess(result.getLatency());
                 successful.add(result);
                 if (configManager.isVerbose()) {
-                    plugin.getLogger().info(String.format("§a[GitHubMirror] %s: %dms ✓", 
+                    plugin.getLogger().info(String.format("§a[GitHubMirror] %s: %dms ✓",
                         mirror.getName(), result.getLatency()));
                 }
             } else {
                 mirror.recordFailure();
                 if (configManager.isVerbose()) {
-                    plugin.getLogger().warning(String.format("§c[GitHubMirror] %s: 失败 - %s", 
+                    plugin.getLogger().warning(String.format("§c[GitHubMirror] %s: 失败 - %s",
                         mirror.getName(), result.getError()));
                 }
             }
@@ -195,26 +214,26 @@ public class MirrorManager {
         if (!successful.isEmpty()) {
             successful.sort((a, b) -> Long.compare(a.getLatency(), b.getLatency()));
             MirrorTestResult best = successful.get(0);
-            
-            if (configManager.isAutoSwitch() && (currentMirror == null || 
+
+            if (configManager.isAutoSwitch() && (currentMirror == null ||
                     best.getLatency() < currentMirror.getAverageLatency())) {
                 MirrorSite oldMirror = currentMirror;
                 currentMirror = best.getMirror();
                 configManager.saveCurrentMirror(currentMirror.getName());
-                
-                String message = String.format("§a[GitHubMirror] 自动切换到最快镜像: %s (%dms)", 
+
+                String message = String.format("§a[GitHubMirror] 自动切换到最快镜像: %s (%dms)",
                     currentMirror.getName(), best.getLatency());
                 if (oldMirror != null) {
-                    message += String.format(" (原: %s, %dms)", oldMirror.getName(), 
+                    message += String.format(" (原: %s, %dms)", oldMirror.getName(),
                         oldMirror.getAverageLatency() == Long.MAX_VALUE ? -1 : oldMirror.getAverageLatency());
                 }
                 plugin.getLogger().info(message);
-                
+
                 if (broadcast && configManager.getEventConfig().isBroadcastToOps()) {
                     broadcastToOps(message);
                 }
             } else if (currentMirror != null) {
-                plugin.getLogger().info(String.format("§a[GitHubMirror] 当前镜像 %s (%dms) 仍是最优", 
+                plugin.getLogger().info(String.format("§a[GitHubMirror] 当前镜像 %s (%dms) 仍是最优",
                     currentMirror.getName(), currentMirror.getAverageLatency()));
             }
         } else {
@@ -225,22 +244,43 @@ public class MirrorManager {
         }
     }
 
+    /** 广播给 OP：切回主线程执行，避免异步线程访问 Bukkit API */
     private void broadcastToOps(String message) {
-        plugin.getServer().getOnlinePlayers().stream()
-            .filter(p -> p.isOp() || p.hasPermission("githubmirror.admin"))
-            .forEach(p -> p.sendMessage(message));
+        Runnable task = () -> {
+            for (Player player : plugin.getServer().getOnlinePlayers()) {
+                if (player.isOp() || player.hasPermission("githubmirror.admin")) {
+                    player.sendMessage(message);
+                }
+            }
+        };
+        if (plugin.getServer().isPrimaryThread()) {
+            task.run();
+            return;
+        }
+        try {
+            plugin.getServer().getScheduler().runTask(plugin, task);
+        } catch (Exception ex) {
+            // 插件关闭中调度器不可用：降级为直接发送
+            task.run();
+        }
     }
 
-    public void setMirror(String name) {
+    /**
+     * 手动设置镜像站
+     *
+     * @return 是否设置成功
+     */
+    public boolean setMirror(String name) {
         for (MirrorSite mirror : mirrors) {
-            if (mirror.getName().equalsIgnoreCase(name) || mirror.getName().equals(name)) {
+            if (name.equalsIgnoreCase(mirror.getName())) {
                 currentMirror = mirror;
-                configManager.saveCurrentMirror(name);
-                plugin.getLogger().info("§a[GitHubMirror] 手动设置镜像站: " + name);
-                return;
+                configManager.saveCurrentMirror(mirror.getName());
+                plugin.getLogger().info("§a[GitHubMirror] 手动设置镜像站: " + mirror.getName());
+                return true;
             }
         }
         plugin.getLogger().warning("§c[GitHubMirror] 未找到镜像站: " + name);
+        return false;
     }
 
     public void resetToDefault() {
@@ -274,29 +314,49 @@ public class MirrorManager {
         return available;
     }
 
+    /**
+     * 获取当前镜像指定类型的域名。
+     * <p>
+     * 拼接用途语义保证：prefix 前缀代理镜像没有独立域名，拼接域名一律回退到
+     * GitHub 官方地址（不会返回 null 导致 "null/..." 拼接错误）；
+     * 完整的 URL 转换请使用 {@link #convertUrl(String)}。
+     *
+     * @param type "api" / "raw" / 其他表示主站
+     */
     public String getMirrorUrl(String type) {
         if (currentMirror == null) return null;
-        switch (type.toLowerCase()) {
-            case "api": return currentMirror.getApiUrl();
-            case "raw": return currentMirror.getRawUrl();
-            default: return currentMirror.getUrl();
+        MirrorSite mirror = currentMirror;
+        String key = type == null ? "" : type.toLowerCase();
+        switch (key) {
+            case "api": {
+                String value = mirror.isPrefix() ? null : mirror.getApiUrl();
+                return normalizeOrDefault(value, "https://api.github.com");
+            }
+            case "raw": {
+                String value = mirror.isPrefix() ? null : mirror.getRawUrl();
+                return normalizeOrDefault(value, "https://raw.githubusercontent.com");
+            }
+            default: {
+                String value = mirror.isPrefix() ? null : mirror.getUrl();
+                return normalizeOrDefault(value, "https://github.com");
+            }
         }
     }
 
+    private static String normalizeOrDefault(String value, String fallback) {
+        if (value == null) return fallback;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? fallback : trimmed;
+    }
+
+    /**
+     * 将 GitHub 链接转换为当前镜像链接（prefix/replace 两种模式均支持）。
+     * 未匹配到已知 GitHub 域名时返回原地址。
+     */
     public String convertUrl(String originalUrl) {
         if (currentMirror == null || originalUrl == null) return originalUrl;
-        
-        if (originalUrl.startsWith("https://github.com/")) {
-            String path = originalUrl.substring("https://github.com/".length());
-            return currentMirror.getUrl() + "/" + path;
-        } else if (originalUrl.startsWith("https://api.github.com/")) {
-            String path = originalUrl.substring("https://api.github.com/".length());
-            return currentMirror.getApiUrl() + "/" + path;
-        } else if (originalUrl.startsWith("https://raw.githubusercontent.com/")) {
-            String path = originalUrl.substring("https://raw.githubusercontent.com/".length());
-            return currentMirror.getRawUrl() + "/" + path;
-        }
-        return originalUrl;
+        String rewritten = currentMirror.rewrite(originalUrl);
+        return rewritten != null ? rewritten : originalUrl;
     }
 
     public static class MirrorTestResult {
@@ -325,6 +385,7 @@ public class MirrorManager {
                 executorService.shutdownNow();
             }
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             executorService.shutdownNow();
         }
     }

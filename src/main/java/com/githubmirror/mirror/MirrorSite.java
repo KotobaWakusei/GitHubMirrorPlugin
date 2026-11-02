@@ -13,13 +13,16 @@ public class MirrorSite {
     private String apiUrl; // 仅 replace 模式: api.github.com 替换域名(空=不支持)
     private String rawUrl; // 仅 replace 模式: *.githubusercontent.com 替换域名(空=不支持)
     private int priority;
-    private boolean enabled;
 
-    private long lastTestTime;
-    private long averageLatency;
-    private int successCount;
-    private int failureCount;
-    private boolean available;
+    /** 默认启用：配置中省略 enabled 字段时按启用处理（Gson 反序列化保留字段初始值） */
+    private boolean enabled = true;
+
+    // 以下统计字段会被测速线程写入、其他线程读取，声明为 volatile 保证可见性
+    private volatile long lastTestTime;
+    private volatile long averageLatency;
+    private volatile int successCount;
+    private volatile int failureCount;
+    private volatile boolean available;
 
     public MirrorSite() {
         this.lastTestTime = 0;
@@ -27,6 +30,7 @@ public class MirrorSite {
         this.successCount = 0;
         this.failureCount = 0;
         this.available = false;
+        this.enabled = true;
     }
 
     public boolean isPrefix() {
@@ -97,15 +101,30 @@ public class MirrorSite {
 
     /**
      * 构造测速探测 URL。
+     * <p>
+     * replace 镜像若无独立 raw 域名（浏览型镜像，无法代理 raw 文件），
+     * 降级为探测镜像主页，避免这类镜像永远无法通过测速。
      *
-     * @return 探测地址；镜像不支持时返回 null
+     * @return 探测地址；镜像完全未配置时返回 null
      */
     public String getTestUrl(String originalTestFile) {
         if (isPrefix()) {
             String base = normalize(url);
             return base.isEmpty() ? null : base + "/" + originalTestFile;
         }
-        return rewrite(originalTestFile);
+        String rewritten = rewrite(originalTestFile);
+        if (rewritten != null) {
+            return rewritten;
+        }
+        String base = normalize(url);
+        return base.isEmpty() ? null : base + "/";
+    }
+
+    /**
+     * 是否从未测速过（冷启动期间按配置优先级先启用该镜像）
+     */
+    public boolean isNeverTested() {
+        return lastTestTime == 0;
     }
 
     public String getName() { return name; }

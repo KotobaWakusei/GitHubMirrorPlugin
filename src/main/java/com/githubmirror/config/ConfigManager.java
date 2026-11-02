@@ -11,13 +11,15 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class ConfigManager {
 
     private final GitHubMirrorPlugin plugin;
     private FileConfiguration config;
-    private List<MirrorSite> mirrors;
+    /** 只读快照：loadMirrors 时整体替换，供并发读取 */
+    private volatile List<MirrorSite> mirrors = List.of();
     private SpeedTestConfig speedTestConfig;
     private String currentMirror;
     private boolean autoSwitch;
@@ -60,27 +62,32 @@ public class ConfigManager {
     }
 
     private void loadMirrors() {
-        mirrors.clear();
+        List<MirrorSite> loaded = new ArrayList<>();
         List<?> mirrorList = config.getList("mirrors");
         if (mirrorList != null) {
             Gson gson = new Gson();
             Type listType = new TypeToken<List<MirrorSite>>() {}.getType();
             String json = gson.toJson(mirrorList);
-            mirrors = gson.fromJson(json, listType);
-            
-            // 过滤启用的镜像站并按优先级排序
-            mirrors.removeIf(m -> !m.isEnabled());
-            mirrors.sort((a, b) -> Integer.compare(a.getPriority(), b.getPriority()));
+            List<MirrorSite> parsed = gson.fromJson(json, listType);
+
+            if (parsed != null) {
+                // enabled 字段缺省时 Gson 保留 MirrorSite 的默认值 true，此处只过滤显式禁用的条目
+                parsed.removeIf(m -> m == null || !m.isEnabled());
+                parsed.sort((a, b) -> Integer.compare(a.getPriority(), b.getPriority()));
+                loaded = parsed;
+            }
         }
+        this.mirrors = Collections.unmodifiableList(loaded);
     }
 
     private void loadSpeedTestConfig() {
-        speedTestConfig.setTimeout(config.getInt("speedtest.timeout", 5000));
-        speedTestConfig.setRetries(config.getInt("speedtest.retries", 2));
-        speedTestConfig.setConcurrent(config.getInt("speedtest.concurrent", 3));
-        speedTestConfig.setIntervalHours(config.getLong("speedtest.interval", 6));
+        // 下限校验，防止非法配置导致线程池/超时异常
+        speedTestConfig.setTimeout(Math.max(1000, config.getInt("speedtest.timeout", 5000)));
+        speedTestConfig.setRetries(Math.max(0, config.getInt("speedtest.retries", 2)));
+        speedTestConfig.setConcurrent(Math.max(1, config.getInt("speedtest.concurrent", 3)));
+        speedTestConfig.setIntervalHours(Math.max(0, config.getLong("speedtest.interval", 6)));
         speedTestConfig.setTestFile(config.getString("speedtest.testFile", "https://raw.githubusercontent.com/github/gitignore/main/README.md"));
-        
+
         List<String> fallbackFiles = config.getStringList("speedtest.fallbackTestFiles");
         if (!fallbackFiles.isEmpty()) {
             speedTestConfig.setFallbackTestFiles(fallbackFiles);
@@ -103,11 +110,29 @@ public class ConfigManager {
 
     public void saveCurrentMirror(String mirrorName) {
         currentMirror = mirrorName;
-        config.set("currentMirror", mirrorName);
+        // 捕获当前配置对象引用，避免与主线程 reload 竞争时写入新配置对象
+        FileConfiguration cfg = config;
+        if (cfg == null) return;
+
+        Runnable saveTask = () -> {
+            cfg.set("currentMirror", mirrorName);
+            try {
+                cfg.save(new File(plugin.getDataFolder(), "config.yml"));
+            } catch (IOException e) {
+                plugin.getLogger().severe("§c[GitHubMirror] 保存配置失败: " + e.getMessage());
+            }
+        };
+
+        // Bukkit 的 YamlConfiguration 非线程安全：写盘必须回到主线程
+        if (plugin.getServer().isPrimaryThread()) {
+            saveTask.run();
+            return;
+        }
         try {
-            config.save(new File(plugin.getDataFolder(), "config.yml"));
-        } catch (IOException e) {
-            plugin.getLogger().severe("§c[GitHubMirror] 保存配置失败: " + e.getMessage());
+            plugin.getServer().getScheduler().runTask(plugin, saveTask);
+        } catch (Exception ex) {
+            // 插件正在关闭、调度器不可用时降级为直接写盘
+            saveTask.run();
         }
     }
 

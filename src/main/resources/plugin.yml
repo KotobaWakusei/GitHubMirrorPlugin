@@ -1,22 +1,23 @@
 name: GitHubMirrorPlugin
-version: 1.1.0
+version: 1.2.0
 main: com.githubmirror.GitHubMirrorPlugin
-api-version: 1.20
-author: YourName
+api-version: '1.20'
+author: GitHubMirrorPlugin Contributors
 description: 自动测速并选择最快GitHub镜像站，解决国内MC服务器连接GitHub困难的问题
-website: https://github.com/yourusername/GitHubMirrorPlugin
 
 commands:
   githubmirror:
     description: GitHub镜像站管理命令
-    usage: /githubmirror <test|status|set|reset|list>
-    permission: githubmirror.admin
+    usage: /githubmirror <test|status|set|reset|list|url|reload|help>
+    # 注意: 不在命令级设置 admin 门禁，由插件按子命令分别校验:
+    #   test/status/set/reset/list/reload -> githubmirror.admin
+    #   url/help                          -> githubmirror.use
     aliases: [ghm, ghmirror]
 
 permissions:
   githubmirror.admin:
-    description: 允许管理GitHub镜像站设置
+    description: 允许管理GitHub镜像站设置 (test/set/reset/list/reload)
     default: op
   githubmirror.use:
-    description: 允许使用镜像站功能
+    description: 允许使用链接转换 (/githubmirror url)
     default: true

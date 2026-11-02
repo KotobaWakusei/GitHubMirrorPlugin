@@ -31,30 +31,49 @@ public class GitHubMirrorAPI {
 
     /**
      * 获取当前最快的镜像站主站地址
-     * @return 镜像站主站URL，如 https://hub.fastgit.org
+     * <p>
+     * 注意：prefix 前缀代理镜像没有独立主站域名，此时返回 GitHub 官方地址；
+     * 如需完整的 URL 转换请优先使用 {@link #convertUrl(String)}。
+     *
+     * @return 镜像站主站URL，如 https://hub.fastgit.org；无镜像时返回 https://github.com
      */
     public static String getMirrorUrl() {
-        return mirrorManager != null ? mirrorManager.getMirrorUrl("web") : "https://github.com";
+        return mirrorManager != null && mirrorManager.getMirrorUrl("web") != null
+                ? mirrorManager.getMirrorUrl("web") : "https://github.com";
     }
 
     /**
      * 获取当前最快的镜像站API地址
-     * @return 镜像站API URL，如 https://api.fastgit.org
+     * <p>
+     * 注意：prefix 前缀代理镜像没有独立 API 域名，此时回退为 GitHub 官方 API 地址；
+     * 如需完整的 URL 转换请优先使用 {@link #convertUrl(String)}。
+     *
+     * @return 镜像站API URL，如 https://api.fastgit.org；不可用时返回 https://api.github.com
      */
     public static String getApiUrl() {
-        return mirrorManager != null ? mirrorManager.getMirrorUrl("api") : "https://api.github.com";
+        return mirrorManager != null && mirrorManager.getMirrorUrl("api") != null
+                ? mirrorManager.getMirrorUrl("api") : "https://api.github.com";
     }
 
     /**
      * 获取当前最快的镜像站Raw文件地址
-     * @return 镜像站Raw URL，如 https://raw.fastgit.org
+     * <p>
+     * 注意：prefix 前缀代理镜像没有独立 Raw 域名，此时回退为 GitHub 官方 Raw 地址；
+     * 如需完整的 URL 转换请优先使用 {@link #convertUrl(String)}。
+     *
+     * @return 镜像站Raw URL，如 https://raw.fastgit.org；不可用时返回 https://raw.githubusercontent.com
      */
     public static String getRawUrl() {
-        return mirrorManager != null ? mirrorManager.getMirrorUrl("raw") : "https://raw.githubusercontent.com";
+        return mirrorManager != null && mirrorManager.getMirrorUrl("raw") != null
+                ? mirrorManager.getMirrorUrl("raw") : "https://raw.githubusercontent.com";
     }
 
     /**
      * 将原始GitHub链接转换为镜像站链接
+     * <p>
+     * 同时支持 prefix 前缀代理与 replace 域名替换两种镜像模式；
+     * 未匹配到已知 GitHub 域名时返回原地址。
+     *
      * @param originalUrl 原始GitHub链接
      * @return 转换后的镜像站链接
      */
@@ -130,6 +149,15 @@ public class GitHubMirrorAPI {
     }
 
     /**
+     * 卸载 API (由主插件在 onDisable 时调用)
+     * 清理静态引用，避免其他插件在插件卸载后使用失效的管理器
+     */
+    public static void shutdown() {
+        plugin = null;
+        mirrorManager = null;
+    }
+
+    /**
      * 获取插件实例
      * @return 插件实例
      */
@@ -188,11 +216,22 @@ public class GitHubMirrorAPI {
     }
 
     /**
-     * 创建 Apache HttpClient 拦截器 (通过反射，无硬依赖)
-     * @return HttpRequestInterceptor 实例，或 null (如果 Apache HttpClient 不在类路径)
+     * 包装 Apache HttpClient (4.x)，在执行前把所有 GitHub 请求重写到当前镜像 (通过反射，无硬依赖)
+     * <p>
+     * 注意：Apache 的 HttpRequestInterceptor 在目标主机路由确定后执行，无法改变连接主机，
+     * 因此本插件提供客户端代理包装而非请求拦截器。
+     * 使用示例:
+     * <pre>
+     * org.apache.http.impl.client.CloseableHttpClient raw = HttpClientBuilder.create().build();
+     * org.apache.http.client.HttpClient client =
+     *     (org.apache.http.client.HttpClient) GitHubMirrorAPI.wrapApacheHttpClient(raw);
+     * </pre>
+     *
+     * @param httpClient Apache HttpClient (4.x) 实例
+     * @return 代理后的 client，或 null (如果 Apache HttpClient 不在类路径)
      */
-    public static Object createApacheHttpClientInterceptor() {
-        return HttpClientInterceptors.createApacheHttpClientInterceptor();
+    public static Object wrapApacheHttpClient(Object httpClient) {
+        return HttpClientInterceptors.wrapApacheHttpClient(httpClient);
     }
 
     /**

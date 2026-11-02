@@ -7,7 +7,7 @@
 | **API 手动转换** | 简单的 URL 替换 | 无依赖、完全可控 | 需修改代码 |
 | **Java HttpClient 拦截器** | 使用 JDK 11+ HttpClient | 标准库、零依赖 | 仅限 HttpClient |
 | **OkHttp 拦截器** | 使用 OkHttp | 无侵入、自动生效 | 需添加 okhttp 依赖 |
-| **Apache HttpClient 拦截器** | 使用 HttpClient 4.x/5.x | 成熟稳定 | 需添加依赖 |
+| **Apache HttpClient 包装** | 使用 HttpClient 4.x | 成熟稳定 | 需添加依赖、客户端包装 |
 | **全局 URL 拦截** | 无法修改第三方库代码 | 完全透明、零代码改动 | 需 JVM 参数 `--add-opens` |
 
 ---
@@ -90,20 +90,17 @@ httpClient.newCall(request).enqueue(new Callback() {
 });
 ```
 
-## 场景 4: Apache HttpClient 5.x
+## 场景 4: Apache HttpClient (4.x)
 
 ```java
-CloseableHttpClient httpClient = HttpClientBuilder.create()
-    .addInterceptorFirst((HttpRequestInterceptor) GitHubMirrorAPI.createApacheHttpClientInterceptor())
-    .setDefaultRequestConfig(RequestConfig.custom()
-        .setConnectTimeout(10000)
-        .setResponseTimeout(30000)
-        .build())
-    .build();
+// 注意: Apache 的 HttpRequestInterceptor 在目标主机路由确定后执行，
+// 无法改变连接主机，因此请使用客户端代理包装而非请求拦截器
+CloseableHttpClient rawClient = HttpClientBuilder.create().build();
+HttpClient httpClient = (HttpClient) GitHubMirrorAPI.wrapApacheHttpClient(rawClient);
 
-// 使用原始 GitHub URL，自动重定向
+// 使用原始 GitHub URL，执行前自动重定向
 HttpGet request = new HttpGet("https://api.github.com/repos/user/repo");
-try (CloseableHttpResponse response = httpClient.execute(request)) {
+try (CloseableHttpResponse response = (CloseableHttpResponse) httpClient.execute(request)) {
     // 处理响应
 }
 ```
@@ -128,6 +125,10 @@ public class DependencyResolver {
     }
 }
 ```
+
+> 注意域名覆盖范围：
+> - 使用 **prefix 前缀代理** 镜像时，任意 GitHub 相关域名 (含 `maven.pkg.github.com`) 都会被转发；
+> - 使用 **replace 域名替换** 镜像时，仅转换 `github.com` / `api.github.com` / `raw.githubusercontent.com` 三个域名，其余返回原链接。
 
 ## 场景 6: 在 plugin.yml 中声明软依赖
 
@@ -297,16 +298,16 @@ public class AvatarLoader {
 
 | GitHubMirrorPlugin | API 版本 | 支持的 MC 版本 | Java 版本 |
 |-------------------|----------|----------------|-----------|
-| 1.0.0             | 1.0      | 1.18+          | 17+       |
+| 1.2.0             | 1.2      | 1.20+          | 17+       |
 
 使用 Maven Central 或本地安装：
 ```bash
 # 本地安装到 Maven 仓库
 mvn install:install-file \
-  -Dfile=GitHubMirrorPlugin-1.0.0.jar \
+  -Dfile=GitHubMirrorPlugin-1.2.0.jar \
   -DgroupId=com.githubmirror \
   -DartifactId=GitHubMirrorPlugin \
-  -Dversion=1.0.0 \
+  -Dversion=1.2.0 \
   -Dpackaging=jar
 ```
 
@@ -314,7 +315,7 @@ mvn install:install-file \
 <dependency>
     <groupId>com.githubmirror</groupId>
     <artifactId>GitHubMirrorPlugin</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
     <scope>provided</scope>
 </dependency>
 ```

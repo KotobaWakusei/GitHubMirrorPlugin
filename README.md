@@ -7,25 +7,28 @@
 | 功能 | 说明 |
 |------|------|
 | 🌐 **全局 URL 拦截** | 自动重定向 `new URL(...).openConnection()` 等所有 HTTP 请求 |
-| 🚀 **自动测速** | 启动时/定时/手动测速所有配置的镜像站 |
+| 🚀 **自动测速** | 启动时/定时/手动测速所有配置的镜像站 (测速自动绕过拦截器，结果不受污染) |
 | 🎯 **智能切换** | 自动选择延迟最低的可用镜像站 |
-| 📦 **9 个内置镜像** | FastGit、Gitee、cnpmjs、ghproxy、云盘加速等 |
+| 📦 **7 个内置镜像** | gh-proxy、ghproxy.net、bgithub.xyz 等，支持 prefix/replace 双模式 |
 | 🔌 **多层拦截支持** | URLStreamHandler / Java HttpClient / OkHttp / Apache HttpClient |
 | 🔧 **灵活配置** | 支持代理、自定义镜像、测速参数调整 |
 
 ## 📋 内置镜像站
 
-| 名称 | 主站 | API | Raw | 优先级 |
-|------|------|-----|-----|--------|
-| GitHub官方 | github.com | api.github.com | raw.githubusercontent.com | 10 |
-| **FastGit (推荐)** | hub.fastgit.org | api.fastgit.org | raw.fastgit.org | **1** |
-| Gitee镜像 | gitee.com | gitee.com/api/v5 | gitee.com | 2 |
-| cnpmjs镜像 | github.com.cnpmjs.org | api.github.com.cnpmjs.org | raw.githubusercontent.com.cnpmjs.org | 3 |
-| ghproxy镜像 | mirror.ghproxy.com | mirror.ghproxy.com | mirror.ghproxy.com | 4 |
-| 云盘加速 | gh.ddlc.top | gh.ddlc.top | gh.ddlc.top | 5 |
-| 静态加速 | gh.api.99988866.xyz | gh.api.99988866.xyz | gh.api.99988866.xyz | 6 |
-| 备用1 | gh-proxy.com | gh-proxy.com | gh-proxy.com | 7 |
-| 备用2 | gh.llkk.cc | gh.llkk.cc | gh.llkk.cc | 8 |
+| 名称 | 类型 | 地址 | 优先级 |
+|------|------|------|--------|
+| **gh-proxy.com (推荐)** | prefix 前缀代理 | https://gh-proxy.com | **1** |
+| ghproxy.net | prefix 前缀代理 | https://ghproxy.net | 2 |
+| ghproxy.homeboyc.cn (大文件稳定) | prefix 前缀代理 | https://ghproxy.homeboyc.cn | 3 |
+| github.akams.cn (支持API) | prefix 前缀代理 | https://github.akams.cn | 4 |
+| bgithub.xyz (全站浏览镜像) | replace 域名替换 | https://bgithub.xyz | 5 |
+| kkgithub.com (全站浏览镜像) | replace 域名替换 | https://kkgithub.com | 6 |
+| GitHub官方 (直连，兜底) | replace | github.com | 100 |
+
+> - **prefix (前缀代理)**：`https://gh-proxy.com/https://github.com/user/repo/...`，只需配置 `url` 字段，支持 Releases/Raw/Archive/Gist/API。
+> - **replace (域名替换)**：`https://github.com/user/repo -> https://bgithub.xyz/user/repo`，可选配置 `apiUrl`/`rawUrl`（留空表示该类资源不加速）。
+
+> ⚠️ **安全提示**：插件会将 GitHub 请求转发给第三方镜像站，下载插件 jar 等重要文件后请自行校验文件校验和。
 
 ## 🚀 快速开始
 
@@ -64,8 +67,9 @@ java --add-opens java.base/java.net=ALL-UNNAMED \
 | `/githubmirror list` | 列出所有镜像站 | `githubmirror.admin` |
 | `/githubmirror set <名称>` | 手动设置镜像站 | `githubmirror.admin` |
 | `/githubmirror reset` | 重置为默认镜像站 | `githubmirror.admin` |
-| `/githubmirror url <链接>` | 转换 GitHub 链接为镜像链接 | `githubmirror.use` |
+| `/githubmirror url <链接>` | 转换 GitHub 链接为镜像链接 | `githubmirror.use` (所有玩家) |
 | `/githubmirror reload` | 重载配置 | `githubmirror.admin` |
+| `/githubmirror help` | 查看帮助 | 无 |
 
 **别名**: `/ghm`, `/ghmirror`
 
@@ -134,11 +138,18 @@ Request request = new Request.Builder()
     .build();
 ```
 
-### 4. Apache HttpClient 拦截器
+### 4. Apache HttpClient (4.x) 客户端包装
 ```java
-CloseableHttpClient client = HttpClientBuilder.create()
-    .addInterceptorFirst((HttpRequestInterceptor) GitHubMirrorAPI.createApacheHttpClientInterceptor())
-    .build();
+// 注意: Apache 的 HttpRequestInterceptor 在目标主机路由确定后执行，
+// 无法改变连接主机，因此请使用客户端代理包装
+CloseableHttpClient rawClient = HttpClientBuilder.create().build();
+HttpClient client = (HttpClient) GitHubMirrorAPI.wrapApacheHttpClient(rawClient);
+
+// 使用原始 GitHub URL，执行前自动重定向
+HttpGet request = new HttpGet("https://raw.githubusercontent.com/user/repo/main/config.yml");
+try (CloseableHttpResponse response = (CloseableHttpResponse) client.execute(request)) {
+    // 处理响应
+}
 ```
 
 ### 5. 低层级连接工具
@@ -154,20 +165,24 @@ HttpURLConnection conn = GitHubMirrorAPI.openConnection(url, proxy);
 
 ### 6. 获取镜像信息
 ```java
-String mirrorUrl = GitHubMirrorAPI.getMirrorUrl();      // https://hub.fastgit.org
-String apiUrl = GitHubMirrorAPI.getApiUrl();            // https://api.fastgit.org
-String rawUrl = GitHubMirrorAPI.getRawUrl();            // https://raw.fastgit.org
-String name = GitHubMirrorAPI.getCurrentMirrorName();   // FastGit (推荐)
+String mirrorUrl = GitHubMirrorAPI.getMirrorUrl();      // 镜像主站地址
+String apiUrl = GitHubMirrorAPI.getApiUrl();            // 镜像 API 地址
+String rawUrl = GitHubMirrorAPI.getRawUrl();            // 镜像 Raw 地址
+String name = GitHubMirrorAPI.getCurrentMirrorName();   // 镜像名称
 MirrorSite mirror = GitHubMirrorAPI.getCurrentMirror(); // 详细信息
 List<MirrorSite> mirrors = GitHubMirrorAPI.getAvailableMirrors(); // 可用列表
 ```
+
+> **prefix 前缀代理镜像注意**：这类镜像没有独立的主站/API/Raw 域名，
+> `getMirrorUrl()`/`getApiUrl()`/`getRawUrl()` 会回退为 GitHub 官方地址（保证拼接结果有效，不会出现 `null/...`）。
+> 需要完整 URL 转换时请一律使用 `GitHubMirrorAPI.convertUrl()` 或 `interceptUrl()`。
 
 ### Maven 依赖 (需将插件 jar 加入本地仓库)
 ```xml
 <dependency>
     <groupId>com.githubmirror</groupId>
     <artifactId>GitHubMirrorPlugin</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
     <scope>provided</scope>
 </dependency>
 ```
@@ -223,8 +238,8 @@ verbose: false  # 不输出重定向日志
 
 ## 📋 权限节点
 
-- `githubmirror.admin` - 管理权限 (默认 OP)
-- `githubmirror.use` - 使用权限 (默认 true)
+- `githubmirror.admin` - 管理权限 (test/set/reset/list/reload，默认 OP)
+- `githubmirror.use` - 使用权限 (/githubmirror url，默认所有玩家)
 
 ## ❓ 常见问题
 
@@ -238,12 +253,26 @@ A: 检查服务器网络，或配置代理。查看控制台错误信息。
 A: 使用 `GitHubMirrorAPI` 转换 URL，或添加 HTTP 客户端拦截器。
 
 **Q: 支持哪些服务端？**
-A: Paper/Spigot/Purpur/Folia 等基于 Bukkit API 的 1.18+ 服务端。Java 17+ 需要添加 JVM 参数。
+A: Paper/Spigot/Purpur 等基于 Bukkit API 的 **1.20+** 服务端 (由 `api-version: 1.20` 决定)。Java 17+ 需要添加 JVM 参数。
 
 **Q: 会不会影响性能？**
-A: 拦截器仅在匹配 GitHub 域名时重定向，其他请求零开销。测速在异步线程进行。
+A: 拦截器仅在匹配 GitHub 域名时重定向，其他请求零开销。测速在异步线程进行，且自动绕过拦截器，结果不受当前镜像污染。
 
 ## 📝 更新日志
+
+### v1.2.0
+- 修复 URL 处理器覆写 equals/hashCode/sameFile 导致的无限递归 (StackOverflowError)
+- 修复测速被自家全局拦截器污染的问题 (测速现在自动绕过重定向)
+- 修复 convertUrl 不支持 prefix 前缀代理模式的问题
+- 修复 prefix 镜像下 getApiUrl/getRawUrl 返回 null 导致的 "null/..." 拼接错误 (现回退官方地址)
+- 修复 reload 后 currentMirror 残留已删除镜像的问题
+- Apache HttpClient 方案改为客户端代理包装 (HttpRequestInterceptor 无法改变目标主机)
+- 修复 OkHttp 动态代理对 toString/hashCode/equals 的无限递归
+- 异步测速回调切回主线程访问 Bukkit API，配置写盘线程安全化
+- 镜像条目缺省 `enabled` 字段时默认启用；测速参数增加下限校验
+- 首次测速完成前 (冷启动) 按配置优先级先启用默认镜像
+- `/githubmirror url` 面向所有玩家开放 (`githubmirror.use`)
+- replace 浏览型镜像无独立 Raw 域名时降级探测主页，不再永远测速失败
 
 ### v1.0.0
 - 全局 URLStreamHandlerFactory 拦截
